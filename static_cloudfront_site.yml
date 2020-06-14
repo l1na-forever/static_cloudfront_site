@@ -1,41 +1,70 @@
 Parameters:
+  DomainCertificateArn:
+    Description: Because there's no way to automate ACM's validation E2E without custom resources, do it offline (and then cut a feature request).
+    Type: String
   DomainName:
     Description: The top-level domain *without* the trailing dot (NOT the FQDN), and WITHOUT any subdomain. E.g., "example.com"
     Type: String
     MaxLength: 1024
   CreateHostedZone:
     Description: Toggle to enable creation of the root hosted zone. Leave disabled when the domain was registered with Amazon Registrar.
-    Type: Boolean
+    Type: String
+    AllowedValues: ["true", "false"]
     Default: false
+Conditions:
+  CreateHostedZoneCondition:
+    !Equals [true, !Ref CreateHostedZone]
 Resources:
   DomainZone:
     Type: AWS::Route53::HostedZone
-    Condition: CreateHostedZone
+    Condition: CreateHostedZoneCondition
     Properties:
-      Name: { Ref: DomainName }
+      Name: !Ref DomainName
   DomainRecords:
     Type: AWS::Route53::RecordSetGroup
     Properties:
-      HostedZoneName: { Ref: DomainName }
+      HostedZoneName: !Ref DomainName
+      RecordSets:
+        - Name: !Ref DomainName
+          Type: A
+          AliasTarget: !GetAtt Distribution.DomainName
+        - Name: { 'Fn::Join': ['.', ['www', { Ref: DomainName }]] }
+          Type: CNAME
+          AliasTarget: !GetAtt Distribution.DomainName
   StaticFilesBucket:
     Type: AWS::S3::Bucket
-    DeletionPolicy: Retain
+    # DeletionPolicy: Retain
     Properties:
-      BucketName: { Ref: DomainName }
+      BucketName: !Ref DomainName
       AccessControl: PublicRead
-      CorsConfiguration:
-        CorsRules:
-          - AllowedOrigins: ['*']
-            AllowedMethods: ['GET', 'PUT']
-            AllowedHeaders: ['*']
-      WebsiteConfiguration:
-        ErrorDocument: error.html
-        IndexDocument: index.html
-  SubdomainRedirectBucket:
-    Type: AWS::S3::Bucket
-    DeletionPolicy: Retain
+      # CorsConfiguration:
+      #   CorsRules:
+      #     - AllowedOrigins: ['*']
+      #       AllowedMethods: ['GET', 'PUT']
+      #       AllowedHeaders: ['*']
+      # WebsiteConfiguration:
+      #   ErrorDocument: error.html
+      #   IndexDocument: index.html
+  Distribution:
+    Type: AWS::CloudFront::Distribution
     Properties:
-      BucketName: { 'Fn::Join': ['.', ['www', { Ref: DomainName }]] }
-      WebsiteConfiguration:
-        RedirectAllRequestsTo:
-          HostName: { Ref: DomainName }
+      DistributionConfig:
+        Enabled: true
+        HttpVersion: http2
+        DefaultCacheBehavior:
+          ForwardedValues:
+            QueryString: false
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+        ViewerCertificate:
+          SslSupportMethod: sni-only
+          AcmCertificateArn: !Ref DomainCertificateArn
+          MinimumProtocolVersion: TLSv1.2_2018
+        Aliases:
+          - !Ref DomainName
+          - { 'Fn::Join': ['.', ['www', { Ref: DomainName }]] }
+        Origins:
+          - Id: S3Origin
+            DomainName: !GetAtt StaticFilesBucket.RegionalDomainName
+            S3OriginConfig:
+              OriginAccessIdentity: ""
