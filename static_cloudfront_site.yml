@@ -1,0 +1,41 @@
+Parameters:
+  DomainName:
+    Description: The top-level domain *without* the trailing dot (NOT the FQDN), and WITHOUT any subdomain. E.g., "example.com"
+    Type: String
+    MaxLength: 1024
+  CreateHostedZone:
+    Description: Toggle to enable creation of the root hosted zone. Leave disabled when the domain was registered with Amazon Registrar.
+    Type: Boolean
+    Default: false
+Resources:
+  DomainZone:
+    Type: AWS::Route53::HostedZone
+    Condition: CreateHostedZone
+    Properties:
+      Name: { Ref: DomainName }
+  DomainRecords:
+    Type: AWS::Route53::RecordSetGroup
+    Properties:
+      HostedZoneName: { Ref: DomainName }
+  StaticFilesBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: { Ref: DomainName }
+      AccessControl: PublicRead
+      CorsConfiguration:
+        CorsRules:
+          - AllowedOrigins: ['*']
+            AllowedMethods: ['GET', 'PUT']
+            AllowedHeaders: ['*']
+      WebsiteConfiguration:
+        ErrorDocument: error.html
+        IndexDocument: index.html
+  SubdomainRedirectBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    Properties:
+      BucketName: { 'Fn::Join': ['.', ['www', { Ref: DomainName }]] }
+      WebsiteConfiguration:
+        RedirectAllRequestsTo:
+          HostName: { Ref: DomainName }
