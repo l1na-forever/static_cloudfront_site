@@ -11,9 +11,15 @@ Parameters:
     Type: String
     AllowedValues: ["true", "false"]
     Default: false
+  Subdomain:
+    Description: Additional subdomain that should be handled by the same bucket/distribution.
+    Type: String
+    Default: "www"
 Conditions:
   CreateHostedZoneCondition:
     !Equals [true, !Ref CreateHostedZone]
+  HasSubdomainCondition:
+    !Not [{ 'Fn::Equals': ["", { Ref: Subdomain }] }]
 Resources:
   DomainZone:
     Type: AWS::Route53::HostedZone
@@ -23,28 +29,49 @@ Resources:
   DomainRecords:
     Type: AWS::Route53::RecordSetGroup
     Properties:
-      HostedZoneName: !Ref DomainName
+      HostedZoneName: !Sub '${DomainName}.'
       RecordSets:
         - Name: !Ref DomainName
           Type: A
-          AliasTarget: !GetAtt Distribution.DomainName
-        - Name: { 'Fn::Join': ['.', ['www', { Ref: DomainName }]] }
+          AliasTarget: 
+            DNSName: !GetAtt Distribution.DomainName
+            HostedZoneId: Z2FDTNDATAQYW2
+  SubdomainRecords:
+    Type: AWS::Route53::RecordSetGroup
+    Condition: HasSubdomainCondition
+    Properties: 
+      HostedZoneName: !Sub '${DomainName}.'
+      RecordSets:
+        - Name: !Sub '${Subdomain}.${DomainName}'
           Type: CNAME
-          AliasTarget: !GetAtt Distribution.DomainName
+          AliasTarget: 
+            DNSName: !GetAtt Distribution.DomainName
+            HostedZoneId: Z2FDTNDATAQYW2
+  StaticFilesBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref StaticFilesBucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          Effect: Allow
+          Principal: { Service: 'cloudfront.amazonaws.com' }
+          Action: s3:GetObject
+          Resource: !Sub 'arn:aws:s3:::${StaticFilesBucket}/*'
+          Condition:
+            StringEquals: { 'AWS:SourceArn': !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution.Id}'}
   StaticFilesBucket:
     Type: AWS::S3::Bucket
-    # DeletionPolicy: Retain
     Properties:
       BucketName: !Ref DomainName
-      AccessControl: PublicRead
-      # CorsConfiguration:
-      #   CorsRules:
-      #     - AllowedOrigins: ['*']
-      #       AllowedMethods: ['GET', 'PUT']
-      #       AllowedHeaders: ['*']
-      # WebsiteConfiguration:
-      #   ErrorDocument: error.html
-      #   IndexDocument: index.html
+  DistributionAccessControl:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties: 
+      OriginAccessControlConfig: 
+          Name: !Sub 'AccessControl${DomainName}'
+          OriginAccessControlOriginType: s3
+          SigningBehavior: always
+          SigningProtocol: sigv4
   Distribution:
     Type: AWS::CloudFront::Distribution
     Properties:
@@ -62,9 +89,10 @@ Resources:
           MinimumProtocolVersion: TLSv1.2_2018
         Aliases:
           - !Ref DomainName
-          - { 'Fn::Join': ['.', ['www', { Ref: DomainName }]] }
+          - !Sub '${Subdomain}.${DomainName}'
         Origins:
           - Id: S3Origin
             DomainName: !GetAtt StaticFilesBucket.RegionalDomainName
+            OriginAccessControlId: !Ref DistributionAccessControl
             S3OriginConfig:
-              OriginAccessIdentity: ""
+              OriginAccessIdentity: ''
