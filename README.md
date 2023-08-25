@@ -1,4 +1,4 @@
-static_cloudformation_site
+static_cloudfront_site
 ==
 Dead-simple way to get a bucket hosted via CloudFront with TLS enabled, complete with CloudFront's recommended origin access controls. 
 
