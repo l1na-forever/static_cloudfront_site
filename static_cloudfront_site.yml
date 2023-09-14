@@ -78,6 +78,7 @@ Resources:
       DistributionConfig:
         Enabled: true
         HttpVersion: http2
+        DefaultRootObject: index.html
         DefaultCacheBehavior:
           ForwardedValues:
             QueryString: false
