@@ -1,50 +1,87 @@
 Parameters:
   DomainCertificateArn:
-    Description: Because there's no way to automate ACM's validation E2E without custom resources, do it offline (and then cut a feature request).
+    Description: ACM certificate in us-east-1 covering DomainName (and the subdomain, if any). create.sh issues one via certificate.yml when none is given.
     Type: String
   DomainName:
-    Description: The top-level domain *without* the trailing dot (NOT the FQDN), and WITHOUT any subdomain. E.g., "example.com"
+    Description: The host name to serve, *without* the trailing dot. Either a zone apex ("example.com") or a host inside a zone ("cdn.example.com", see HostedZoneName).
     Type: String
     MaxLength: 1024
-  CreateHostedZone:
-    Description: Toggle to enable creation of the root hosted zone. Leave disabled when the domain was registered with Amazon Registrar.
+  HostedZoneName:
+    Description: Route 53 zone the records go in, without the trailing dot. Leave empty when DomainName is the zone apex.
     Type: String
-    AllowedValues: ["true", "false"]
-    Default: false
+    Default: ""
   Subdomain:
-    Description: Additional subdomain that should be handled by the same bucket/distribution.
+    Description: Additional subdomain that should be handled by the same bucket/distribution. Empty to serve DomainName only.
     Type: String
     Default: "www"
+  BucketName:
+    Description: Name of the bucket holding the site's files. Empty to name it after DomainName.
+    Type: String
+    Default: ""
+  DefaultRootObject:
+    Description: Object served for requests to "/". Empty to disable (e.g. for a file host).
+    Type: String
+    Default: index.html
+  NotFoundPage:
+    Description: Path of the page served for missing objects, e.g. "/404.html". Empty to return S3's 403 error as-is.
+    Type: String
+    Default: ""
+  GeoBlockedCountries:
+    Description: Comma-separated ISO 3166-1 alpha-2 country codes to deny, e.g. "RU,CN". Empty to allow everywhere.
+    Type: String
+    Default: ""
+  MinimumProtocolVersion:
+    Description: CloudFront viewer TLS security policy. TLSv1.3_2025 refuses TLS 1.2 clients.
+    Type: String
+    AllowedValues: [TLSv1.2_2018, TLSv1.2_2019, TLSv1.2_2021, TLSv1.2_2025, TLSv1.3_2025]
+    Default: TLSv1.2_2021
 Conditions:
-  CreateHostedZoneCondition:
-    !Equals [true, !Ref CreateHostedZone]
   HasSubdomainCondition:
     !Not [{ 'Fn::Equals': ["", { Ref: Subdomain }] }]
+  HasHostedZoneNameCondition:
+    !Not [!Equals ["", !Ref HostedZoneName]]
+  HasBucketNameCondition:
+    !Not [!Equals ["", !Ref BucketName]]
+  HasDefaultRootObjectCondition:
+    !Not [!Equals ["", !Ref DefaultRootObject]]
+  HasNotFoundPageCondition:
+    !Not [!Equals ["", !Ref NotFoundPage]]
+  HasGeoBlockCondition:
+    !Not [!Equals ["", !Ref GeoBlockedCountries]]
 Resources:
-  DomainZone:
-    Type: AWS::Route53::HostedZone
-    Condition: CreateHostedZoneCondition
-    Properties:
-      Name: !Ref DomainName
   DomainRecords:
     Type: AWS::Route53::RecordSetGroup
     Properties:
-      HostedZoneName: !Sub '${DomainName}.'
+      HostedZoneName: !Sub
+        - '${Zone}.'
+        - Zone: !If [HasHostedZoneNameCondition, !Ref HostedZoneName, !Ref DomainName]
       RecordSets:
         - Name: !Ref DomainName
           Type: A
-          AliasTarget: 
+          AliasTarget:
+            DNSName: !GetAtt Distribution.DomainName
+            HostedZoneId: Z2FDTNDATAQYW2
+        - Name: !Ref DomainName
+          Type: AAAA
+          AliasTarget:
             DNSName: !GetAtt Distribution.DomainName
             HostedZoneId: Z2FDTNDATAQYW2
   SubdomainRecords:
     Type: AWS::Route53::RecordSetGroup
     Condition: HasSubdomainCondition
-    Properties: 
-      HostedZoneName: !Sub '${DomainName}.'
+    Properties:
+      HostedZoneName: !Sub
+        - '${Zone}.'
+        - Zone: !If [HasHostedZoneNameCondition, !Ref HostedZoneName, !Ref DomainName]
       RecordSets:
         - Name: !Sub '${Subdomain}.${DomainName}'
           Type: A
-          AliasTarget: 
+          AliasTarget:
+            DNSName: !GetAtt Distribution.DomainName
+            HostedZoneId: Z2FDTNDATAQYW2
+        - Name: !Sub '${Subdomain}.${DomainName}'
+          Type: AAAA
+          AliasTarget:
             DNSName: !GetAtt Distribution.DomainName
             HostedZoneId: Z2FDTNDATAQYW2
   StaticFilesBucketPolicy:
@@ -62,12 +99,22 @@ Resources:
             StringEquals: { 'AWS:SourceArn': !Sub 'arn:aws:cloudfront::${AWS::AccountId}:distribution/${Distribution.Id}'}
   StaticFilesBucket:
     Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
     Properties:
-      BucketName: !Ref DomainName
+      BucketName: !If [HasBucketNameCondition, !Ref BucketName, !Ref DomainName]
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
   DistributionAccessControl:
     Type: AWS::CloudFront::OriginAccessControl
-    Properties: 
-      OriginAccessControlConfig: 
+    Properties:
+      OriginAccessControlConfig:
           Name: !Sub 'AccessControl${DomainName}'
           OriginAccessControlOriginType: s3
           SigningBehavior: always
@@ -77,23 +124,52 @@ Resources:
     Properties:
       DistributionConfig:
         Enabled: true
-        HttpVersion: http2
-        DefaultRootObject: index.html
+        HttpVersion: http2and3
+        IPV6Enabled: true
+        DefaultRootObject: !If [HasDefaultRootObjectCondition, !Ref DefaultRootObject, !Ref AWS::NoValue]
         DefaultCacheBehavior:
-          ForwardedValues:
-            QueryString: false
+          # Managed-CachingOptimized
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6
+          Compress: true
+          # Managed-SecurityHeadersPolicy
+          ResponseHeadersPolicyId: 67f7725c-6f97-4210-82d7-5512b31e9d03
           TargetOriginId: S3Origin
           ViewerProtocolPolicy: redirect-to-https
+        CustomErrorResponses: !If
+          - HasNotFoundPageCondition
+          # S3 answers 403 for missing keys, since CloudFront isn't granted s3:ListBucket
+          - - ErrorCode: 403
+              ResponseCode: 404
+              ResponsePagePath: !Ref NotFoundPage
+              ErrorCachingMinTTL: 10
+            - ErrorCode: 404
+              ResponseCode: 404
+              ResponsePagePath: !Ref NotFoundPage
+              ErrorCachingMinTTL: 10
+          - !Ref AWS::NoValue
+        Restrictions: !If
+          - HasGeoBlockCondition
+          - GeoRestriction:
+              RestrictionType: blacklist
+              Locations: !Split [",", !Ref GeoBlockedCountries]
+          - !Ref AWS::NoValue
         ViewerCertificate:
           SslSupportMethod: sni-only
           AcmCertificateArn: !Ref DomainCertificateArn
-          MinimumProtocolVersion: TLSv1.2_2018
+          MinimumProtocolVersion: !Ref MinimumProtocolVersion
         Aliases:
           - !Ref DomainName
-          - !Sub '${Subdomain}.${DomainName}'
+          - !If [HasSubdomainCondition, !Sub '${Subdomain}.${DomainName}', !Ref AWS::NoValue]
         Origins:
           - Id: S3Origin
             DomainName: !GetAtt StaticFilesBucket.RegionalDomainName
             OriginAccessControlId: !Ref DistributionAccessControl
             S3OriginConfig:
               OriginAccessIdentity: ''
+Outputs:
+  BucketName:
+    Value: !Ref StaticFilesBucket
+  DistributionId:
+    Value: !Ref Distribution
+  DistributionDomainName:
+    Value: !GetAtt Distribution.DomainName

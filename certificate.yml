@@ -1,0 +1,37 @@
+Description: DNS-validated ACM certificate for static_cloudfront_site.yml. Deploy in us-east-1, since CloudFront only accepts certificates from there.
+Parameters:
+  DomainName:
+    Description: The host name to serve, *without* the trailing dot. Same value as the site stack's DomainName.
+    Type: String
+    MaxLength: 1024
+  Subdomain:
+    Description: Additional subdomain the certificate should also cover. Empty for DomainName only.
+    Type: String
+    Default: "www"
+  HostedZoneId:
+    Description: ID of the Route 53 zone containing DomainName; the validation records are written there.
+    Type: AWS::Route53::HostedZone::Id
+Conditions:
+  HasSubdomainCondition:
+    !Not [!Equals ["", !Ref Subdomain]]
+Resources:
+  Certificate:
+    Type: AWS::CertificateManager::Certificate
+    Properties:
+      DomainName: !Ref DomainName
+      SubjectAlternativeNames: !If
+        - HasSubdomainCondition
+        - [!Sub '${Subdomain}.${DomainName}']
+        - !Ref AWS::NoValue
+      ValidationMethod: DNS
+      DomainValidationOptions:
+        - DomainName: !Ref DomainName
+          HostedZoneId: !Ref HostedZoneId
+        - !If
+          - HasSubdomainCondition
+          - DomainName: !Sub '${Subdomain}.${DomainName}'
+            HostedZoneId: !Ref HostedZoneId
+          - !Ref AWS::NoValue
+Outputs:
+  CertificateArn:
+    Value: !Ref Certificate
